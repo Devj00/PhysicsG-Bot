@@ -110,7 +110,7 @@ def main():
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doubt))
 
         print("✅ PhysicsG Bot চালু হয়ে গেছে! Telegram এ গিয়ে test করো।")
-        app.run_polling()
+        app.run_polling(stop_signals=None)
 
     threading.Thread(target=run_bot, daemon=True).start()
 
