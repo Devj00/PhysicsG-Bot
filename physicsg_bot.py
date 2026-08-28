@@ -26,7 +26,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # Gemini AI setup
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-3.6-flash")
 
 # System instruction — bot কে বলে দিচ্ছি কীভাবে answer দিতে হবে
 SYSTEM_PROMPT = (
