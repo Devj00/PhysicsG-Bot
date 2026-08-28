@@ -10,6 +10,7 @@ Google Gemini AI দিয়ে answer generate করে automatically reply �
 import os
 import logging
 import threading
+import asyncio
 from flask import Flask
 import google.generativeai as genai
 from telegram import Update
@@ -98,16 +99,23 @@ def run_web_server():
 
 
 def main():
-    # web server আলাদা thread এ চালানো, যাতে bot ও একইসাথে চলে
-    threading.Thread(target=run_web_server, daemon=True).start()
+    # Telegram bot টাকে আলাদা thread এ, নিজস্ব explicit event loop দিয়ে চালানো হচ্ছে।
+    # এটা Python এর নতুন version এর সাথে হওয়া RuntimeError এড়াতে সাহায্য করে।
+    def run_bot():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doubt))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doubt))
+        print("✅ PhysicsG Bot চালু হয়ে গেছে! Telegram এ গিয়ে test করো।")
+        app.run_polling()
 
-    print("✅ PhysicsG Bot চালু হয়ে গেছে! Telegram এ গিয়ে test করো।")
-    app.run_polling()
+    threading.Thread(target=run_bot, daemon=True).start()
+
+    # web server মূল (main) thread এ চালানো হচ্ছে, যাতে Render port ঠিকমতো ধরতে পারে।
+    run_web_server()
 
 
 if __name__ == "__main__":
