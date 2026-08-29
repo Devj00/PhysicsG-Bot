@@ -44,7 +44,16 @@ SYSTEM_PROMPT = (
     "If they wrote in Bangla, reply fully in Bangla. "
     "If they wrote in English, reply fully in English. "
     "Explain clearly and simply, step by step, as a good teacher would. "
-    "Keep answers focused and not overly long unless the question needs detail."
+    "Keep answers focused and not overly long unless the question needs detail.\n\n"
+    "FORMATTING RULES (very important — this is a Telegram chat, not a document):\n"
+    "- Do NOT use LaTeX. Never use $ or $$ symbols for equations.\n"
+    "- Do NOT use markdown headers like ###.\n"
+    "- Do NOT use ** for bold. Write plain text only.\n"
+    "- Write equations in plain readable text, e.g., E = kQ / r^2, "
+    "use ^ for powers, sqrt(x) for square roots, and normal words like "
+    "'times' or 'x' for multiplication if needed.\n"
+    "- Use simple numbered steps or dashes (-) for structure instead of headers.\n"
+    "- Keep it clean and easy to read on a phone screen."
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -307,6 +316,25 @@ def run_web_server():
     web_app.run(host="0.0.0.0", port=port)
 
 
+async def list_students(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher দেখতে পারবে এখন পর্যন্ত কারা কারা bot এ join করেছে"""
+    if not is_teacher(update):
+        await update.message.reply_text("দুঃখিত, এই command শুধু teacher ব্যবহার করতে পারবে।")
+        return
+
+    subs = load_subscribers()
+    # Teacher নিজেকে লিস্ট থেকে বাদ দিয়ে দেখানো হচ্ছে
+    students = {cid: name for cid, name in subs.items() if str(cid) != str(TEACHER_CHAT_ID)}
+
+    if not students:
+        await update.message.reply_text("এখনো কোনো student bot এ join করেনি।")
+        return
+
+    lines = [f"{i+1}. {name}" for i, name in enumerate(students.values())]
+    message = f"👥 মোট {len(students)} জন student join করেছে:\n\n" + "\n".join(lines)
+    await update.message.reply_text(message)
+
+
 def main():
     def run_bot():
         loop = asyncio.new_event_loop()
@@ -315,6 +343,7 @@ def main():
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("whoami", whoami))
+        app.add_handler(CommandHandler("students", list_students))
         app.add_handler(CommandHandler("broadcast", broadcast_command))
         app.add_handler(CommandHandler("quiz", quiz_command))
         app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
