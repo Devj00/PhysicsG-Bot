@@ -15,9 +15,16 @@ Teacher (তুমি) এই bot দিয়ে আরও ৩টা কাজ 
 import os
 import io
 import json
+import uuid
+import tempfile
 import logging
 import threading
 import asyncio
+import concurrent.futures
+import matplotlib
+matplotlib.use("Agg")  # কোনো screen/display ছাড়াই ছবি বানানোর জন্য
+import matplotlib.pyplot as plt
+import numpy as np
 from flask import Flask
 import google.generativeai as genai
 from PIL import Image
@@ -137,6 +144,9 @@ async def handle_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(answer)
 
+    # প্রয়োজনে diagram-ও পাঠানো হচ্ছে
+    await send_diagram_if_useful(update, context, student_question)
+
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Student ছবি (question এর photo) পাঠালে এই function চলে"""
@@ -180,6 +190,109 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text(answer)
+
+    # প্রয়োজনে diagram-ও পাঠানো হচ্ছে
+    await send_diagram_if_useful(update, context, caption or "the physics question in the photo")
+
+
+# ============================================
+# DIAGRAM FEATURE: Gemini কে diagram আঁকার জন্য matplotlib
+# code লিখতে বলা হয়, তারপর সেটা নিরাপদভাবে চালিয়ে ছবি বানানো হয়।
+# ============================================
+DIAGRAM_PROMPT = (
+    "You are a physics diagram assistant. Given the physics question below, "
+    "decide if a simple labeled diagram (like a ray diagram, force diagram, "
+    "circuit diagram, field diagram, or geometry figure) would genuinely help "
+    "a student understand it.\n\n"
+    "If a diagram would NOT help (e.g. a purely numeric or conceptual question "
+    "with no geometry), respond with EXACTLY this and nothing else: NO_DIAGRAM\n\n"
+    "If a diagram WOULD help, respond with ONLY valid Python code, no markdown "
+    "fences, no explanation, nothing else. The code must:\n"
+    "- Use only 'plt' (matplotlib.pyplot) and 'np' (numpy), which are already "
+    "available — do not import anything.\n"
+    "- Draw a clean, clearly labeled diagram using lines, arrows, circles, and "
+    "text labels as appropriate.\n"
+    "- Use plt.gca().set_aspect('equal') for geometric diagrams where shape "
+    "matters.\n"
+    "- Turn off unnecessary axis clutter with plt.axis('off') unless axes are "
+    "needed.\n"
+    "- Save the figure to the path stored in the variable OUTPUT_PATH using "
+    "plt.savefig(OUTPUT_PATH, bbox_inches='tight', dpi=150). Do NOT use plt.show().\n\n"
+    f"Question: {{question}}"
+)
+
+# Diagram code চালানোর সময় শুধু এই safe builtins গুলো ব্যবহার করতে দেওয়া হচ্ছে
+_SAFE_BUILTINS = {
+    "range": range, "len": len, "str": str, "float": float, "int": int,
+    "enumerate": enumerate, "zip": zip, "list": list, "dict": dict, "tuple": tuple,
+    "min": min, "max": max, "abs": abs, "round": round, "sum": sum,
+    "True": True, "False": False, "None": None, "print": print,
+}
+
+
+def _run_diagram_code(code: str, output_path: str):
+    """AI-generated matplotlib code টা একটা সীমিত (restricted) environment এ চালানো হয়"""
+    plt.close("all")
+    safe_globals = {
+        "__builtins__": _SAFE_BUILTINS,
+        "plt": plt,
+        "np": np,
+        "OUTPUT_PATH": output_path,
+    }
+    exec(code, safe_globals)
+    plt.close("all")
+
+
+def generate_diagram(question_text: str):
+    """
+    প্রশ্নের জন্য diagram দরকার হলে সেটা বানিয়ে file path রিটার্ন করে,
+    দরকার না হলে বা কোনো সমস্যা হলে None রিটার্ন করে।
+    """
+    try:
+        code_response = model.generate_content(
+            DIAGRAM_PROMPT.format(question=question_text)
+        )
+        code_text = code_response.text.strip()
+
+        # Markdown code fence থাকলে সেটা সরিয়ে ফেলা হচ্ছে
+        if code_text.startswith("```"):
+            code_text = code_text.split("```")[1]
+            if code_text.startswith("python"):
+                code_text = code_text[len("python"):]
+            code_text = code_text.strip()
+
+        if "NO_DIAGRAM" in code_text or "plt.savefig" not in code_text:
+            return None
+
+        output_path = os.path.join(tempfile.gettempdir(), f"diagram_{uuid.uuid4().hex}.png")
+
+        # সময়ের সীমা বেঁধে দেওয়া হচ্ছে, যাতে কোনো ভুল code আটকে না থাকে
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_diagram_code, code_text, output_path)
+            future.result(timeout=15)
+
+        if os.path.exists(output_path):
+            return output_path
+        return None
+    except Exception as e:
+        logger.error(f"Diagram generation failed: {e}")
+        return None
+
+
+async def send_diagram_if_useful(update: Update, context: ContextTypes.DEFAULT_TYPE, question_text: str):
+    """Diagram বানানো সম্ভব হলে সেটা student কে পাঠিয়ে দেয়"""
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        loop = asyncio.get_event_loop()
+        diagram_path = await loop.run_in_executor(None, generate_diagram, question_text)
+
+        if diagram_path:
+            with open(diagram_path, "rb") as f:
+                await update.message.reply_photo(photo=f)
+            os.remove(diagram_path)
+    except Exception as e:
+        logger.error(f"Could not send diagram: {e}")
+        # Diagram না গেলেও কোনো সমস্যা নেই, শুধু text answer-ই থেকে যাবে
 
 
 # ============================================
