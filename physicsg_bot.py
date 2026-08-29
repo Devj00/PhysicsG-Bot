@@ -5,33 +5,41 @@ PhysicsG Doubt Solver Bot
 Google Gemini AI দিয়ে answer generate করে automatically reply করে।
 
 প্রশ্ন যে ভাষায় হবে (বাংলা/English), উত্তরও সেই ভাষায় দেবে।
+
+Teacher (তুমি) এই bot দিয়ে আরও ৩টা কাজ করতে পারবে:
+1. Text/PDF/link broadcast করে সব student কে একসাথে পাঠানো
+2. Quiz পাঠানো (Telegram এর built-in quiz-poll ব্যবহার করে)
+3. Student রা ছবি পাঠালেও bot সেখান থেকে question পড়ে solve করবে
 """
 
 import os
+import io
+import json
 import logging
 import threading
 import asyncio
 from flask import Flask
 import google.generativeai as genai
+from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 
 # ============================================
-# KEY দুটো এখন সরাসরি code এ নেই (নিরাপত্তার জন্য)।
-# এগুলো Render.com এ "Environment Variables" হিসেবে
-# TELEGRAM_BOT_TOKEN এবং GEMINI_API_KEY নামে বসাতে হবে।
+# KEY গুলো Render.com এ "Environment Variables" হিসেবে বসাতে হবে:
+# TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, TEACHER_CHAT_ID
 # ============================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+TEACHER_CHAT_ID = os.environ.get("TEACHER_CHAT_ID")  # তোমার নিজের Telegram ID (text হিসেবে)
 
 # Gemini AI setup
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-3.6-flash")
 
-# System instruction — bot কে বলে দিচ্ছি কীভাবে answer দিতে হবে
 SYSTEM_PROMPT = (
     "You are PhysicsG Doubt Solver, a helpful physics tutor bot for students. "
-    "A student will send you a physics doubt or question. "
+    "A student will send you a physics doubt or question, sometimes as a photo "
+    "of a question paper or textbook page. "
     "IMPORTANT: Reply in the SAME language the student used. "
     "If they wrote in Bangla, reply fully in Bangla. "
     "If they wrote in English, reply fully in English. "
@@ -39,29 +47,71 @@ SYSTEM_PROMPT = (
     "Keep answers focused and not overly long unless the question needs detail."
 )
 
-# Logging (terminal এ কী হচ্ছে দেখার জন্য)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ============================================
+# Student দের chat_id গুলো একটা ছোট্ট JSON ফাইলে save রাখা হচ্ছে,
+# যাতে broadcast/quiz পাঠানোর সময় জানা যায় কাকে কাকে পাঠাতে হবে।
+# (নোট: Render এ নতুন deploy হলে এই ফাইল রিসেট হয়ে যায়,
+# কিন্তু bot ঘুমিয়ে-জেগে ওঠার সময় এটা থেকেই যায়।)
+# ============================================
+SUBSCRIBERS_FILE = "subscribers.json"
+
+
+def load_subscribers():
+    try:
+        with open(SUBSCRIBERS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_subscribers(subs):
+    with open(SUBSCRIBERS_FILE, "w") as f:
+        json.dump(subs, f)
+
+
+def add_subscriber(chat_id, name):
+    subs = load_subscribers()
+    if str(chat_id) not in subs:
+        subs[str(chat_id)] = name
+        save_subscribers(subs)
+        logger.info(f"New subscriber added: {name} ({chat_id})")
+
+
+def is_teacher(update: Update) -> bool:
+    return TEACHER_CHAT_ID is not None and str(update.effective_user.id) == str(TEACHER_CHAT_ID)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """যখন কেউ /start command দেবে"""
+    add_subscriber(update.effective_chat.id, update.effective_user.first_name)
     await update.message.reply_text(
         "👋 স্বাগতম PhysicsG Doubt Solver তে!\n\n"
-        "তোমার physics doubt এখানে লিখে পাঠাও, আমি সাথে সাথে answer দিয়ে দেব।\n\n"
+        "তোমার physics doubt (লেখা বা ছবি) এখানে পাঠাও, আমি সাথে সাথে answer দিয়ে দেব।\n\n"
         "👋 Welcome to PhysicsG Doubt Solver!\n"
-        "Send me your physics doubt and I'll answer it instantly."
+        "Send me your physics doubt (text or photo) and I'll answer it instantly."
     )
 
 
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """নিজের Telegram ID জানার জন্য একটা ছোট command (setup এর সময় লাগবে)"""
+    await update.message.reply_text(f"তোমার Telegram user ID: {update.effective_user.id}")
+
+
 async def handle_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Student এর message পেলে এই function চলে"""
+    """Student এর লেখা doubt পেলে এই function চলে"""
+    add_subscriber(update.effective_chat.id, update.effective_user.first_name)
+
+    # Teacher নিজে text পাঠালে সেটা broadcast হিসেবে ধরা হবে (নিচে দেখো), doubt না
+    if is_teacher(update):
+        return
+
     student_question = update.message.text
     student_name = update.message.from_user.first_name
-
     logger.info(f"Question from {student_name}: {student_question}")
 
-    # "typing..." দেখানো যাতে student বোঝে bot কাজ করছে
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
@@ -77,6 +127,165 @@ async def handle_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text(answer)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Student ছবি (question এর photo) পাঠালে এই function চলে"""
+    add_subscriber(update.effective_chat.id, update.effective_user.first_name)
+
+    student_name = update.message.from_user.first_name
+    caption = update.message.caption or ""
+
+    # Teacher যদি ছবি পাঠায় (নোটের ছবি ইত্যাদি), সেটাও broadcast হিসেবে পাঠিয়ে দাও
+    if is_teacher(update):
+        await broadcast_message(update, context)
+        return
+
+    logger.info(f"Photo received from {student_name}, caption: {caption}")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        image = Image.open(io.BytesIO(photo_bytes))
+
+        prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            "The student sent a photo of one or more physics questions "
+            "(possibly a question paper with multiple numbered questions). "
+            "Read the question(s) carefully from the image and solve them "
+            "step by step. If there are multiple questions, solve each one "
+            "clearly with its number.\n\n"
+            f"Student's message/caption (may be empty): {caption}"
+        )
+
+        response = model.generate_content([prompt, image])
+        answer = response.text
+    except Exception as e:
+        logger.error(f"Error generating answer from photo: {e}")
+        answer = (
+            "দুঃখিত, ছবিটা থেকে answer generate করতে সমস্যা হচ্ছে। ছবিটা পরিষ্কার কিনা "
+            "দেখে আবার পাঠাও, অথবা প্রশ্নটা লিখে পাঠাও।\n"
+            "Sorry, I couldn't read the image properly. Please try a clearer photo, "
+            "or type the question instead."
+        )
+
+    await update.message.reply_text(answer)
+
+
+# ============================================
+# TEACHER ONLY FEATURES: broadcast আর quiz
+# ============================================
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Teacher এর পাঠানো যেকোনো কিছু (text/PDF/photo/link) সব student কে forward করে দেয়"""
+    if not is_teacher(update):
+        return
+
+    subs = load_subscribers()
+    sent, failed = 0, 0
+
+    for chat_id in subs:
+        if str(chat_id) == str(TEACHER_CHAT_ID):
+            continue
+        try:
+            await context.bot.copy_message(
+                chat_id=int(chat_id),
+                from_chat_id=update.effective_chat.id,
+                message_id=update.message.message_id,
+            )
+            sent += 1
+        except Exception as e:
+            logger.error(f"Broadcast failed for {chat_id}: {e}")
+            failed += 1
+
+    await update.message.reply_text(f"✅ পাঠানো হয়েছে {sent} জন student কে। (Failed: {failed})")
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcast এর পর লেখা text সব student কে পাঠায়"""
+    if not is_teacher(update):
+        await update.message.reply_text("দুঃখিত, এই command শুধু teacher ব্যবহার করতে পারবে।")
+        return
+
+    text_to_send = update.message.text.replace("/broadcast", "", 1).strip()
+    if not text_to_send:
+        await update.message.reply_text(
+            "Broadcast করার মতো কিছু লেখো, যেমন:\n/broadcast আগামীকাল ক্লাস টেস্ট আছে।\n\n"
+            "PDF বা link পাঠাতে চাইলে সরাসরি ফাইল/লিংক bot কে পাঠাও (কোনো command লাগবে না)।"
+        )
+        return
+
+    subs = load_subscribers()
+    sent, failed = 0, 0
+    for chat_id in subs:
+        if str(chat_id) == str(TEACHER_CHAT_ID):
+            continue
+        try:
+            await context.bot.send_message(chat_id=int(chat_id), text=f"📢 {text_to_send}")
+            sent += 1
+        except Exception as e:
+            logger.error(f"Broadcast failed for {chat_id}: {e}")
+            failed += 1
+
+    await update.message.reply_text(f"✅ পাঠানো হয়েছে {sent} জন student কে। (Failed: {failed})")
+
+
+async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Teacher quiz পাঠাতে এভাবে লিখবে:
+    /quiz প্রশ্ন লেখো | অপশন ১ | অপশন ২ | অপশন ৩ | অপশন ৪ | সঠিক অপশনের নাম্বার(1-4)
+
+    উদাহরণ:
+    /quiz নিউটনের প্রথম সূত্রের অপর নাম কী? | জড়তার সূত্র | মহাকর্ষ সূত্র | গতির সূত্র | শক্তির সূত্র | 1
+    """
+    if not is_teacher(update):
+        await update.message.reply_text("দুঃখিত, এই command শুধু teacher ব্যবহার করতে পারবে।")
+        return
+
+    raw = update.message.text.replace("/quiz", "", 1).strip()
+    parts = [p.strip() for p in raw.split("|")]
+
+    if len(parts) < 6:
+        await update.message.reply_text(
+            "সঠিক ফরম্যাটে quiz লেখো:\n\n"
+            "/quiz প্রশ্ন | অপশন ১ | অপশন ২ | অপশন ৩ | অপশন ৪ | সঠিক অপশনের নাম্বার\n\n"
+            "উদাহরণ:\n"
+            "/quiz নিউটনের প্রথম সূত্রের অপর নাম কী? | জড়তার সূত্র | মহাকর্ষ সূত্র | "
+            "গতির সূত্র | শক্তির সূত্র | 1"
+        )
+        return
+
+    question = parts[0]
+    options = parts[1:5]
+    try:
+        correct_index = int(parts[5]) - 1
+        if correct_index not in range(4):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("সঠিক অপশনের নাম্বার ১ থেকে ৪ এর মধ্যে একটা সংখ্যা হতে হবে।")
+        return
+
+    subs = load_subscribers()
+    sent, failed = 0, 0
+    for chat_id in subs:
+        if str(chat_id) == str(TEACHER_CHAT_ID):
+            continue
+        try:
+            await context.bot.send_poll(
+                chat_id=int(chat_id),
+                question=question,
+                options=options,
+                type="quiz",
+                correct_option_id=correct_index,
+                is_anonymous=False,
+            )
+            sent += 1
+        except Exception as e:
+            logger.error(f"Quiz send failed for {chat_id}: {e}")
+            failed += 1
+
+    await update.message.reply_text(f"✅ Quiz পাঠানো হয়েছে {sent} জন student কে। (Failed: {failed})")
 
 
 # ============================================
@@ -99,22 +308,24 @@ def run_web_server():
 
 
 def main():
-    # Telegram bot টাকে আলাদা thread এ, নিজস্ব explicit event loop দিয়ে চালানো হচ্ছে।
-    # এটা Python এর নতুন version এর সাথে হওয়া RuntimeError এড়াতে সাহায্য করে।
     def run_bot():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("whoami", whoami))
+        app.add_handler(CommandHandler("broadcast", broadcast_command))
+        app.add_handler(CommandHandler("quiz", quiz_command))
+        app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        # Teacher এর পাঠানো PDF/ডকুমেন্ট সবাইকে broadcast হবে
+        app.add_handler(MessageHandler(filters.Document.ALL, broadcast_message))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doubt))
 
         print("✅ PhysicsG Bot চালু হয়ে গেছে! Telegram এ গিয়ে test করো।")
         app.run_polling(stop_signals=None)
 
     threading.Thread(target=run_bot, daemon=True).start()
-
-    # web server মূল (main) thread এ চালানো হচ্ছে, যাতে Render port ঠিকমতো ধরতে পারে।
     run_web_server()
 
 
